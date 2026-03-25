@@ -1,0 +1,9 @@
+local-frontend/
+
+# Terraform local artifacts
+.terraform/
+*.tfstate
+*.tfstate.*
+.terraform.lock.hcl
+terraform/*.zip
+terraform/indexer-response.json
