@@ -13,6 +13,18 @@ data "archive_file" "search_zip" {
   output_path = "${path.module}/search_players.zip"
 }
 
+data "archive_file" "upload_image_zip" {
+  type        = "zip"
+  source_file = "${path.module}/../lambda/upload_player_image.py"
+  output_path = "${path.module}/upload_player_image.zip"
+}
+
+data "archive_file" "fetch_image_zip" {
+  type        = "zip"
+  source_file = "${path.module}/../lambda/fetch_player_image.py"
+  output_path = "${path.module}/fetch_player_image.zip"
+}
+
 data "aws_iam_policy_document" "lambda_assume_role" {
   statement {
     actions = ["sts:AssumeRole"]
@@ -125,6 +137,97 @@ resource "aws_iam_role_policy" "search_inline" {
 }
 
 #
+# IAM: upload image Lambda
+#
+resource "aws_iam_role" "upload_image" {
+  name               = "${var.project_name}-upload-image-role"
+  assume_role_policy = data.aws_iam_policy_document.lambda_assume_role.json
+}
+
+resource "aws_iam_role_policy_attachment" "upload_image_basic" {
+  role       = aws_iam_role.upload_image.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+}
+
+data "aws_iam_policy_document" "upload_image_policy" {
+  statement {
+    sid = "DynamoDBPlayerReadWrite"
+
+    actions = [
+      "dynamodb:GetItem",
+      "dynamodb:UpdateItem"
+    ]
+
+    resources = [
+      "arn:aws:dynamodb:${data.aws_region.current.id}:${data.aws_caller_identity.current.account_id}:table/${var.table_name}"
+    ]
+  }
+
+  statement {
+    sid = "S3PutPlayerImage"
+
+    actions = [
+      "s3:PutObject"
+    ]
+
+    resources = [
+      "arn:aws:s3:::${var.bucket_name}/*"
+    ]
+  }
+}
+
+resource "aws_iam_role_policy" "upload_image_inline" {
+  name   = "${var.project_name}-upload-image-policy"
+  role   = aws_iam_role.upload_image.id
+  policy = data.aws_iam_policy_document.upload_image_policy.json
+}
+
+#
+# IAM: fetch player image Lambda
+#
+resource "aws_iam_role" "fetch_image" {
+  name               = "${var.project_name}-fetch-image-role"
+  assume_role_policy = data.aws_iam_policy_document.lambda_assume_role.json
+}
+
+resource "aws_iam_role_policy_attachment" "fetch_image_basic" {
+  role       = aws_iam_role.fetch_image.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+}
+
+data "aws_iam_policy_document" "fetch_image_policy" {
+  statement {
+    sid = "DynamoDBPlayerRead"
+
+    actions = [
+      "dynamodb:GetItem"
+    ]
+
+    resources = [
+      "arn:aws:dynamodb:${data.aws_region.current.id}:${data.aws_caller_identity.current.account_id}:table/${var.table_name}"
+    ]
+  }
+
+  statement {
+    sid = "S3GetPlayerImage"
+
+    actions = [
+      "s3:GetObject"
+    ]
+
+    resources = [
+      "arn:aws:s3:::${var.bucket_name}/*"
+    ]
+  }
+}
+
+resource "aws_iam_role_policy" "fetch_image_inline" {
+  name   = "${var.project_name}-fetch-image-policy"
+  role   = aws_iam_role.fetch_image.id
+  policy = data.aws_iam_policy_document.fetch_image_policy.json
+}
+
+#
 # Lambdas
 #
 resource "aws_lambda_function" "indexer" {
@@ -176,6 +279,56 @@ resource "aws_lambda_function" "search" {
   ]
 }
 
+resource "aws_lambda_function" "upload_image" {
+  function_name    = "${var.project_name}-upload-image"
+  role             = aws_iam_role.upload_image.arn
+  filename         = data.archive_file.upload_image_zip.output_path
+  source_code_hash = data.archive_file.upload_image_zip.output_base64sha256
+
+  runtime = "python3.12"
+  handler = "upload_player_image.lambda_handler"
+
+  timeout     = var.search_lambda_timeout
+  memory_size = 256
+
+  environment {
+    variables = {
+      TABLE_NAME  = var.table_name
+      BUCKET_NAME = var.bucket_name
+    }
+  }
+
+  depends_on = [
+    aws_iam_role_policy_attachment.upload_image_basic,
+    aws_iam_role_policy.upload_image_inline
+  ]
+}
+
+resource "aws_lambda_function" "fetch_image" {
+  function_name    = "${var.project_name}-fetch-image"
+  role             = aws_iam_role.fetch_image.arn
+  filename         = data.archive_file.fetch_image_zip.output_path
+  source_code_hash = data.archive_file.fetch_image_zip.output_base64sha256
+
+  runtime = "python3.12"
+  handler = "fetch_player_image.lambda_handler"
+
+  timeout     = var.search_lambda_timeout
+  memory_size = 256
+
+  environment {
+    variables = {
+      TABLE_NAME  = var.table_name
+      BUCKET_NAME = var.bucket_name
+    }
+  }
+
+  depends_on = [
+    aws_iam_role_policy_attachment.fetch_image_basic,
+    aws_iam_role_policy.fetch_image_inline
+  ]
+}
+
 #
 # API Gateway HTTP API
 #
@@ -207,6 +360,22 @@ resource "aws_apigatewayv2_integration" "indexer" {
   payload_format_version = "2.0"
 }
 
+resource "aws_apigatewayv2_integration" "upload_image" {
+  api_id                 = aws_apigatewayv2_api.http.id
+  integration_type       = "AWS_PROXY"
+  integration_method     = "POST"
+  integration_uri        = aws_lambda_function.upload_image.invoke_arn
+  payload_format_version = "2.0"
+}
+
+resource "aws_apigatewayv2_integration" "fetch_image" {
+  api_id                 = aws_apigatewayv2_api.http.id
+  integration_type       = "AWS_PROXY"
+  integration_method     = "POST"
+  integration_uri        = aws_lambda_function.fetch_image.invoke_arn
+  payload_format_version = "2.0"
+}
+
 resource "aws_apigatewayv2_route" "search_post" {
   api_id    = aws_apigatewayv2_api.http.id
   route_key = "POST /search"
@@ -217,6 +386,18 @@ resource "aws_apigatewayv2_route" "index_post" {
   api_id    = aws_apigatewayv2_api.http.id
   route_key = "POST /index"
   target    = "integrations/${aws_apigatewayv2_integration.indexer.id}"
+}
+
+resource "aws_apigatewayv2_route" "upload_image_post" {
+  api_id    = aws_apigatewayv2_api.http.id
+  route_key = "POST /upload-image"
+  target    = "integrations/${aws_apigatewayv2_integration.upload_image.id}"
+}
+
+resource "aws_apigatewayv2_route" "fetch_image_post" {
+  api_id    = aws_apigatewayv2_api.http.id
+  route_key = "POST /player-image"
+  target    = "integrations/${aws_apigatewayv2_integration.fetch_image.id}"
 }
 
 resource "aws_apigatewayv2_stage" "default" {
@@ -240,6 +421,22 @@ resource "aws_lambda_permission" "apigw_indexer" {
   statement_id  = "AllowAPIGatewayInvokeIndexer"
   action        = "lambda:InvokeFunction"
   function_name = aws_lambda_function.indexer.function_name
+  principal     = "apigateway.amazonaws.com"
+  source_arn    = "${aws_apigatewayv2_api.http.execution_arn}/*/*"
+}
+
+resource "aws_lambda_permission" "apigw_upload_image" {
+  statement_id  = "AllowAPIGatewayInvokeUploadImage"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.upload_image.function_name
+  principal     = "apigateway.amazonaws.com"
+  source_arn    = "${aws_apigatewayv2_api.http.execution_arn}/*/*"
+}
+
+resource "aws_lambda_permission" "apigw_fetch_image" {
+  statement_id  = "AllowAPIGatewayInvokeFetchImage"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.fetch_image.function_name
   principal     = "apigateway.amazonaws.com"
   source_arn    = "${aws_apigatewayv2_api.http.execution_arn}/*/*"
 }
