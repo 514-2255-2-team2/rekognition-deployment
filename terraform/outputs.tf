@@ -10,6 +10,14 @@ output "index_url" {
   value = "${aws_apigatewayv2_stage.default.invoke_url}/index"
 }
 
+output "upload_url" {
+  value = "${aws_apigatewayv2_stage.default.invoke_url}/upload"
+}
+
+output "player_details_url" {
+  value = "${aws_apigatewayv2_stage.default.invoke_url}/player-details"
+}
+
 output "index_lambda_name" {
   value = aws_lambda_function.indexer.function_name
 }
@@ -18,10 +26,14 @@ output "search_lambda_name" {
   value = aws_lambda_function.search.function_name
 }
 
-output "upload_image_url" {
-  value = "${aws_apigatewayv2_stage.default.invoke_url}/upload-image"
+output "upload_lambda_name" {
+  value = aws_lambda_function.upload.function_name
 }
 
-output "player_image_url" {
-  value = "${aws_apigatewayv2_stage.default.invoke_url}/player-image"
+output "player_details_lambda_name" {
+  value = aws_lambda_function.player_details.function_name
+}
+
+output "user_upload_bucket_name" {
+  value = aws_s3_bucket.user_uploads.bucket
 }

@@ -1,6 +1,10 @@
 data "aws_caller_identity" "current" {}
 data "aws_region" "current" {}
 
+locals {
+  user_upload_bucket_name = var.user_upload_bucket_name != "" ? var.user_upload_bucket_name : "${var.project_name}-user-uploads-${data.aws_caller_identity.current.account_id}-${var.aws_region}"
+}
+
 data "archive_file" "indexer_zip" {
   type        = "zip"
   source_file = "${path.module}/../lambda/index_players.py"
@@ -13,16 +17,16 @@ data "archive_file" "search_zip" {
   output_path = "${path.module}/search_players.zip"
 }
 
-data "archive_file" "upload_image_zip" {
+data "archive_file" "upload_zip" {
   type        = "zip"
-  source_file = "${path.module}/../lambda/upload_player_image.py"
-  output_path = "${path.module}/upload_player_image.zip"
+  source_file = "${path.module}/../lambda/upload_user_image.py"
+  output_path = "${path.module}/upload_user_image.zip"
 }
 
-data "archive_file" "fetch_image_zip" {
+data "archive_file" "player_details_zip" {
   type        = "zip"
-  source_file = "${path.module}/../lambda/fetch_player_image.py"
-  output_path = "${path.module}/fetch_player_image.zip"
+  source_file = "${path.module}/../lambda/get_player_details.py"
+  output_path = "${path.module}/get_player_details.zip"
 }
 
 data "aws_iam_policy_document" "lambda_assume_role" {
@@ -32,6 +36,33 @@ data "aws_iam_policy_document" "lambda_assume_role" {
     principals {
       type        = "Service"
       identifiers = ["lambda.amazonaws.com"]
+    }
+  }
+}
+
+#
+# User upload bucket
+#
+resource "aws_s3_bucket" "user_uploads" {
+  bucket        = local.user_upload_bucket_name
+  force_destroy = var.user_upload_bucket_force_destroy
+}
+
+resource "aws_s3_bucket_public_access_block" "user_uploads" {
+  bucket = aws_s3_bucket.user_uploads.id
+
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "user_uploads" {
+  bucket = aws_s3_bucket.user_uploads.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
     }
   }
 }
@@ -59,7 +90,7 @@ data "aws_iam_policy_document" "indexer_policy" {
     ]
 
     resources = [
-      "arn:aws:dynamodb:${data.aws_region.current.id}:${data.aws_caller_identity.current.account_id}:table/${var.table_name}"
+      "arn:aws:dynamodb:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:table/${var.table_name}"
     ]
   }
 
@@ -95,6 +126,7 @@ resource "aws_iam_role_policy" "indexer_inline" {
 
 #
 # IAM: search Lambda
+# reads the user-uploaded image bucket
 #
 resource "aws_iam_role" "search" {
   name               = "${var.project_name}-search-role"
@@ -108,14 +140,14 @@ resource "aws_iam_role_policy_attachment" "search_basic" {
 
 data "aws_iam_policy_document" "search_policy" {
   statement {
-    sid = "S3ReadImages"
+    sid = "S3ReadUserImages"
 
     actions = [
       "s3:GetObject"
     ]
 
     resources = [
-      "arn:aws:s3:::${var.bucket_name}/*"
+      "${aws_s3_bucket.user_uploads.arn}/*"
     ]
   }
 
@@ -137,79 +169,66 @@ resource "aws_iam_role_policy" "search_inline" {
 }
 
 #
-# IAM: upload image Lambda
+# IAM: upload Lambda
 #
-resource "aws_iam_role" "upload_image" {
-  name               = "${var.project_name}-upload-image-role"
+resource "aws_iam_role" "upload" {
+  name               = "${var.project_name}-upload-role"
   assume_role_policy = data.aws_iam_policy_document.lambda_assume_role.json
 }
 
-resource "aws_iam_role_policy_attachment" "upload_image_basic" {
-  role       = aws_iam_role.upload_image.name
+resource "aws_iam_role_policy_attachment" "upload_basic" {
+  role       = aws_iam_role.upload.name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 }
 
-data "aws_iam_policy_document" "upload_image_policy" {
+data "aws_iam_policy_document" "upload_policy" {
   statement {
-    sid = "DynamoDBPlayerReadWrite"
-
-    actions = [
-      "dynamodb:GetItem",
-      "dynamodb:UpdateItem"
-    ]
-
-    resources = [
-      "arn:aws:dynamodb:${data.aws_region.current.id}:${data.aws_caller_identity.current.account_id}:table/${var.table_name}"
-    ]
-  }
-
-  statement {
-    sid = "S3PutPlayerImage"
+    sid = "S3PutUserImages"
 
     actions = [
       "s3:PutObject"
     ]
 
     resources = [
-      "arn:aws:s3:::${var.bucket_name}/*"
+      "${aws_s3_bucket.user_uploads.arn}/*"
     ]
   }
 }
 
-resource "aws_iam_role_policy" "upload_image_inline" {
-  name   = "${var.project_name}-upload-image-policy"
-  role   = aws_iam_role.upload_image.id
-  policy = data.aws_iam_policy_document.upload_image_policy.json
+resource "aws_iam_role_policy" "upload_inline" {
+  name   = "${var.project_name}-upload-policy"
+  role   = aws_iam_role.upload.id
+  policy = data.aws_iam_policy_document.upload_policy.json
 }
 
 #
-# IAM: fetch player image Lambda
+# IAM: player details Lambda
 #
-resource "aws_iam_role" "fetch_image" {
-  name               = "${var.project_name}-fetch-image-role"
+resource "aws_iam_role" "player_details" {
+  name               = "${var.project_name}-player-details-role"
   assume_role_policy = data.aws_iam_policy_document.lambda_assume_role.json
 }
 
-resource "aws_iam_role_policy_attachment" "fetch_image_basic" {
-  role       = aws_iam_role.fetch_image.name
+resource "aws_iam_role_policy_attachment" "player_details_basic" {
+  role       = aws_iam_role.player_details.name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 }
 
-data "aws_iam_policy_document" "fetch_image_policy" {
+data "aws_iam_policy_document" "player_details_policy" {
   statement {
-    sid = "DynamoDBPlayerRead"
+    sid = "DynamoDBGetPlayer"
 
     actions = [
       "dynamodb:GetItem"
     ]
 
     resources = [
-      "arn:aws:dynamodb:${data.aws_region.current.id}:${data.aws_caller_identity.current.account_id}:table/${var.table_name}"
+      "arn:aws:dynamodb:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:table/${var.table_name}"
     ]
   }
 
   statement {
-    sid = "S3GetPlayerImage"
+    sid = "S3ReadPlayerImages"
 
     actions = [
       "s3:GetObject"
@@ -221,10 +240,10 @@ data "aws_iam_policy_document" "fetch_image_policy" {
   }
 }
 
-resource "aws_iam_role_policy" "fetch_image_inline" {
-  name   = "${var.project_name}-fetch-image-policy"
-  role   = aws_iam_role.fetch_image.id
-  policy = data.aws_iam_policy_document.fetch_image_policy.json
+resource "aws_iam_role_policy" "player_details_inline" {
+  name   = "${var.project_name}-player-details-policy"
+  role   = aws_iam_role.player_details.id
+  policy = data.aws_iam_policy_document.player_details_policy.json
 }
 
 #
@@ -269,7 +288,7 @@ resource "aws_lambda_function" "search" {
 
   environment {
     variables = {
-      BUCKET_NAME = var.bucket_name
+      BUCKET_NAME = aws_s3_bucket.user_uploads.bucket
     }
   }
 
@@ -279,53 +298,53 @@ resource "aws_lambda_function" "search" {
   ]
 }
 
-resource "aws_lambda_function" "upload_image" {
-  function_name    = "${var.project_name}-upload-image"
-  role             = aws_iam_role.upload_image.arn
-  filename         = data.archive_file.upload_image_zip.output_path
-  source_code_hash = data.archive_file.upload_image_zip.output_base64sha256
+resource "aws_lambda_function" "upload" {
+  function_name    = "${var.project_name}-upload"
+  role             = aws_iam_role.upload.arn
+  filename         = data.archive_file.upload_zip.output_path
+  source_code_hash = data.archive_file.upload_zip.output_base64sha256
 
   runtime = "python3.12"
-  handler = "upload_player_image.lambda_handler"
+  handler = "upload_user_image.lambda_handler"
 
-  timeout     = var.search_lambda_timeout
+  timeout     = var.upload_lambda_timeout
   memory_size = 256
 
   environment {
     variables = {
-      TABLE_NAME  = var.table_name
-      BUCKET_NAME = var.bucket_name
+      BUCKET_NAME = aws_s3_bucket.user_uploads.bucket
     }
   }
 
   depends_on = [
-    aws_iam_role_policy_attachment.upload_image_basic,
-    aws_iam_role_policy.upload_image_inline
+    aws_iam_role_policy_attachment.upload_basic,
+    aws_iam_role_policy.upload_inline
   ]
 }
 
-resource "aws_lambda_function" "fetch_image" {
-  function_name    = "${var.project_name}-fetch-image"
-  role             = aws_iam_role.fetch_image.arn
-  filename         = data.archive_file.fetch_image_zip.output_path
-  source_code_hash = data.archive_file.fetch_image_zip.output_base64sha256
+resource "aws_lambda_function" "player_details" {
+  function_name    = "${var.project_name}-player-details"
+  role             = aws_iam_role.player_details.arn
+  filename         = data.archive_file.player_details_zip.output_path
+  source_code_hash = data.archive_file.player_details_zip.output_base64sha256
 
   runtime = "python3.12"
-  handler = "fetch_player_image.lambda_handler"
+  handler = "get_player_details.lambda_handler"
 
-  timeout     = var.search_lambda_timeout
+  timeout     = var.player_details_lambda_timeout
   memory_size = 256
 
   environment {
     variables = {
-      TABLE_NAME  = var.table_name
-      BUCKET_NAME = var.bucket_name
+      TABLE_NAME          = var.table_name
+      BUCKET_NAME         = var.bucket_name
+      SIGNED_URL_EXPIRES  = tostring(var.player_image_url_expires)
     }
   }
 
   depends_on = [
-    aws_iam_role_policy_attachment.fetch_image_basic,
-    aws_iam_role_policy.fetch_image_inline
+    aws_iam_role_policy_attachment.player_details_basic,
+    aws_iam_role_policy.player_details_inline
   ]
 }
 
@@ -360,19 +379,19 @@ resource "aws_apigatewayv2_integration" "indexer" {
   payload_format_version = "2.0"
 }
 
-resource "aws_apigatewayv2_integration" "upload_image" {
+resource "aws_apigatewayv2_integration" "upload" {
   api_id                 = aws_apigatewayv2_api.http.id
   integration_type       = "AWS_PROXY"
   integration_method     = "POST"
-  integration_uri        = aws_lambda_function.upload_image.invoke_arn
+  integration_uri        = aws_lambda_function.upload.invoke_arn
   payload_format_version = "2.0"
 }
 
-resource "aws_apigatewayv2_integration" "fetch_image" {
+resource "aws_apigatewayv2_integration" "player_details" {
   api_id                 = aws_apigatewayv2_api.http.id
   integration_type       = "AWS_PROXY"
   integration_method     = "POST"
-  integration_uri        = aws_lambda_function.fetch_image.invoke_arn
+  integration_uri        = aws_lambda_function.player_details.invoke_arn
   payload_format_version = "2.0"
 }
 
@@ -388,16 +407,16 @@ resource "aws_apigatewayv2_route" "index_post" {
   target    = "integrations/${aws_apigatewayv2_integration.indexer.id}"
 }
 
-resource "aws_apigatewayv2_route" "upload_image_post" {
+resource "aws_apigatewayv2_route" "upload_post" {
   api_id    = aws_apigatewayv2_api.http.id
-  route_key = "POST /upload-image"
-  target    = "integrations/${aws_apigatewayv2_integration.upload_image.id}"
+  route_key = "POST /upload"
+  target    = "integrations/${aws_apigatewayv2_integration.upload.id}"
 }
 
-resource "aws_apigatewayv2_route" "fetch_image_post" {
+resource "aws_apigatewayv2_route" "player_details_post" {
   api_id    = aws_apigatewayv2_api.http.id
-  route_key = "POST /player-image"
-  target    = "integrations/${aws_apigatewayv2_integration.fetch_image.id}"
+  route_key = "POST /player-details"
+  target    = "integrations/${aws_apigatewayv2_integration.player_details.id}"
 }
 
 resource "aws_apigatewayv2_stage" "default" {
@@ -425,18 +444,18 @@ resource "aws_lambda_permission" "apigw_indexer" {
   source_arn    = "${aws_apigatewayv2_api.http.execution_arn}/*/*"
 }
 
-resource "aws_lambda_permission" "apigw_upload_image" {
-  statement_id  = "AllowAPIGatewayInvokeUploadImage"
+resource "aws_lambda_permission" "apigw_upload" {
+  statement_id  = "AllowAPIGatewayInvokeUpload"
   action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.upload_image.function_name
+  function_name = aws_lambda_function.upload.function_name
   principal     = "apigateway.amazonaws.com"
   source_arn    = "${aws_apigatewayv2_api.http.execution_arn}/*/*"
 }
 
-resource "aws_lambda_permission" "apigw_fetch_image" {
-  statement_id  = "AllowAPIGatewayInvokeFetchImage"
+resource "aws_lambda_permission" "apigw_player_details" {
+  statement_id  = "AllowAPIGatewayInvokePlayerDetails"
   action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.fetch_image.function_name
+  function_name = aws_lambda_function.player_details.function_name
   principal     = "apigateway.amazonaws.com"
   source_arn    = "${aws_apigatewayv2_api.http.execution_arn}/*/*"
 }
